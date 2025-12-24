@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+import sys
+import math
+
+import rclpy
+from rclpy.node import Node
+
+from turtlesim.msg import Pose
+from geometry_msgs.msg import Twist
+from functools import partial
+
+from turtlesim_interfaces.msg import Turtle
+from turtlesim_interfaces.msg import TurtleArray
+from turtlesim_interfaces.srv import CatchTurtle
+
+
+class GoToLocationNode(Node):
+    def __init__(self):
+        super().__init__("go_to_loc_node")
+        self.coeff = 1.5
+        self.pose_threshold_linear = 0.2
+        self.pose_threshold_angular = 0.01
+        self.target_x = 4.0
+        self.target_y = 9.0
+
+        self.pose_ = None
+        self.new_turtle_to_catch_ = None
+
+        self.publisher_ = self.create_publisher(Twist, "/turtle1/cmd_vel", 10)
+        self.subscriber_ = self.create_subscription(Pose, "/turtle1/pose", self.callback_turtle_pose, 10)
+        self.new_turtle_subscriber_ = self.create_subscription(TurtleArray, "/new_turtles", self.callback_new_turtles, 10)
+        self.timer = self.create_timer(0.05, self.turtle_controller)
+
+        self.get_logger().info("GO TO  Location Node has been started")
+        
+    def callback_turtle_pose(self, msg):
+        self.pose_ = msg
+
+    def callback_new_turtles(self, msg):
+        if len(msg.turtles) > 0:
+            self.new_turtle_to_catch_ = msg.turtles[0]
+
+    def turtle_controller(self):
+        if self.pose_ == None or self.new_turtle_to_catch_ == None:
+            return
+
+        msg = Twist()
+        dist_x = self.new_turtle_to_catch_.x - self.pose_.x
+        dist_y = self.new_turtle_to_catch_.y - self.pose_.y
+
+        distance = math.sqrt(dist_x**2 + dist_y**2)
+        target_theta = math.atan2(dist_y, dist_x)
+        angle_error = math.atan2(
+            math.sin(target_theta - self.pose_.theta),
+            math.cos(target_theta - self.pose_.theta)
+        )
+
+        if abs(angle_error) > self.pose_threshold_angular:
+            msg.angular.z = angle_error * self.coeff
+        else:
+            if distance >= self.pose_threshold_linear:
+                msg.linear.x = distance * self.coeff
+            else:
+                msg.linear.x = 0.0
+                msg.angular.z = 0.0
+                self.call_catch_turtle_server(self.new_turtle_to_catch_.name)
+                self.new_turtle_to_catch_ = None
+                self.get_logger().info("Success")
+
+        self.publisher_.publish(msg)
+
+    def call_catch_turtle_server(self, turtle_name):
+        client_ = self.create_client(CatchTurtle, "/catch")
+        while not client_.wait_for_service(1.0):
+            self.get_logger().warn("Waiting for Server - [Catch Turtles]")
+
+        request = CatchTurtle.Request()
+        request.name = turtle_name
+
+        future = client_.call_async(request)
+        future.add_done_callback(partial(self.callback_call_catch_turtle, turtle_name=turtle_name))
+
+    def callback_call_catch_turtle(self, future, turtle_name):
+        try:
+            response = future.result()
+            self.get_logger().info("turtle:" + turtle_name + " successfully caught!")
+        except Exception as e:
+            self.get_logger().error("Service call failed %r" % (e,))
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = GoToLocationNode()
+    rclpy.spin(node)
+    rclpy.shutdown()
+
+if __name__ == "__main__":
+    main()
